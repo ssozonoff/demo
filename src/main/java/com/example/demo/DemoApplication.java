@@ -1,6 +1,7 @@
 package com.example.demo;
 
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -11,6 +12,7 @@ import org.springframework.kafka.config.ConcurrentKafkaListenerContainerFactory;
 import org.springframework.kafka.core.ConsumerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.listener.ContainerProperties;
+import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
 import org.springframework.kafka.listener.SeekToCurrentErrorHandler;
 import org.springframework.kafka.support.converter.MessagingMessageConverter;
 import org.springframework.kafka.test.EmbeddedKafkaBroker;
@@ -46,13 +48,18 @@ public class DemoApplication {
     }
 
     @Bean
+    public NewTopic dlTopic() {
+        return new NewTopic("demo.DLT", 3, (short) 1);
+    }
+
+    @Bean
     public ApplicationRunner runner(KafkaTemplate<String, String> template) {
         return args -> IntStream.range(0, 3).forEach(i -> template.send("demo", i, null, String.valueOf(i)));
     }
 
     @Bean
     public ConcurrentKafkaListenerContainerFactory<String, String> kafkaListenerContainerFactory(
-            ConsumerFactory<String, String> consumerFactory) {
+            ConsumerFactory<String, String> consumerFactory, KafkaTemplate<Object, Object> dlTemplate) {
         ConcurrentKafkaListenerContainerFactory<String, String> factory = new ConcurrentKafkaListenerContainerFactory<>();
         factory.setConsumerFactory(consumerFactory);
         factory.setConcurrency(2);
@@ -82,9 +89,30 @@ public class DemoApplication {
         retryTemplate.setBackOffPolicy(new ExponentialBackOffPolicy());
         factory.setRetryTemplate(retryTemplate);
 
-        factory.setRecoveryCallback(context -> null);
+        factory.setRecoveryCallback(context -> {
+
+            Object o = context.getAttribute("record");
+            if (o instanceof ConsumerRecord) {
+                ConsumerRecord r = (ConsumerRecord) context.getAttribute("record");
+
+                DeadLetterPublishingRecoverer dr = new DeadLetterPublishingRecoverer(dlTemplate);
+                dr.accept((ConsumerRecord)o, new Exception(context.getLastThrowable()));
+
+                if (r != null)
+                    System.err.println("Sending msg to dead letter topic " + r.toString());
+            }
+            return null;
+        });
 
         return factory;
+    }
+
+
+    @KafkaListener(topics = "demo.DLT",
+            groupId = "demo-dlt",
+            properties = {"max.poll.interval.ms:120000"})
+    public void dltListener(String in) {
+        System.err.println("  DTL message ---->  " + in);
     }
 
     @KafkaListener(topics = "demo",
@@ -122,8 +150,10 @@ public class DemoApplication {
 
     static class ExceptionA extends RuntimeException {
     }
+
     static class ExceptionB extends RuntimeException {
     }
+
     static class ExceptionC extends RuntimeException {
     }
 
