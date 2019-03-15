@@ -1,6 +1,7 @@
 package com.example.demo;
 
 import org.apache.kafka.clients.admin.NewTopic;
+import org.apache.kafka.clients.consumer.Consumer;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.SpringApplication;
@@ -13,6 +14,7 @@ import org.springframework.kafka.core.ConsumerFactory;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.listener.ContainerProperties;
 import org.springframework.kafka.listener.DeadLetterPublishingRecoverer;
+import org.springframework.kafka.listener.MessageListenerContainer;
 import org.springframework.kafka.listener.SeekToCurrentErrorHandler;
 import org.springframework.kafka.support.converter.MessagingMessageConverter;
 import org.springframework.kafka.test.EmbeddedKafkaBroker;
@@ -24,7 +26,9 @@ import org.springframework.retry.policy.NeverRetryPolicy;
 import org.springframework.retry.policy.SimpleRetryPolicy;
 import org.springframework.retry.support.RetryTemplate;
 
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.stream.IntStream;
 
@@ -71,7 +75,17 @@ public class DemoApplication {
         factory.setStatefulRetry(true);
 
         // error handler
-        factory.setErrorHandler(new SeekToCurrentErrorHandler(-1));
+        factory.setErrorHandler(new SeekToCurrentErrorHandler(-1) {
+            @Override
+            public void handle(Exception thrownException, List<ConsumerRecord<?, ?>> records, Consumer<?, ?> consumer, MessageListenerContainer container) {
+                Throwable cause = thrownException;
+                while (cause.getCause() != null) {
+                    cause = cause.getCause();
+                }
+                System.err.println("ex --> " + cause.getClass().getSimpleName());
+                super.handle(thrownException, records, consumer, container);
+            }
+        });
 
         RetryTemplate retryTemplate = new RetryTemplate();
 
@@ -90,13 +104,13 @@ public class DemoApplication {
         factory.setRetryTemplate(retryTemplate);
 
         factory.setRecoveryCallback(context -> {
-
+            
             Object o = context.getAttribute("record");
             if (o instanceof ConsumerRecord) {
                 ConsumerRecord r = (ConsumerRecord) context.getAttribute("record");
 
                 DeadLetterPublishingRecoverer dr = new DeadLetterPublishingRecoverer(dlTemplate);
-                dr.accept((ConsumerRecord)o, new Exception(context.getLastThrowable()));
+                dr.accept((ConsumerRecord) o, new Exception(context.getLastThrowable()));
 
                 if (r != null)
                     System.err.println("Sending msg to dead letter topic " + r.toString());
@@ -127,6 +141,18 @@ public class DemoApplication {
         } else if ("2".equals(in)) {
             throw new ExceptionC();
         }
+    }
+
+    static Class<? extends Throwable> getCause(Throwable t, Class<? extends Throwable> defaultCause, Class<? extends Throwable>... causes) {
+        List<Class<? extends Throwable>> classifiers = Arrays.asList(causes);
+        Throwable cause = t;
+        while (cause != null) {
+            if (classifiers.contains(cause.getClass())) {
+                return cause.getClass();
+            }
+            cause = cause.getCause();
+        }
+        return defaultCause;
     }
 
     static class UnrwappingSubclassClassifier extends SubclassClassifier<Throwable, RetryPolicy> {
